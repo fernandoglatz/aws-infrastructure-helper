@@ -11,10 +11,12 @@ import (
 	"net"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	route53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
+
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/route53"
 )
 
 type HelperService struct {
@@ -106,30 +108,30 @@ func (service *HelperService) updateDNS(ctx context.Context, recordName string, 
 	secretKey := awsConfig.Credentials.SecretKey
 	region := awsConfig.Region
 
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(region),
-		Credentials: credentials.NewStaticCredentials(accessKey, secretKey, ""),
-	})
+	// Create AWS configuration using V2 SDK
+	cfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
+	)
 	if err != nil {
 		return &exceptions.WrappedError{
 			Error: err,
 		}
 	}
 
-	svc := route53.New(sess)
-	recordType := "A"
+	svc := route53.NewFromConfig(cfg)
 
-	changeBatch := &route53.ChangeBatch{
-		Changes: []*route53.Change{
+	changeBatch := &route53types.ChangeBatch{
+		Changes: []route53types.Change{
 			{
-				Action: aws.String(route53.ChangeActionUpsert),
-				ResourceRecordSet: &route53.ResourceRecordSet{
-					Name: aws.String(recordName),
-					Type: aws.String(recordType),
+				Action: route53types.ChangeActionUpsert,
+				ResourceRecordSet: &route53types.ResourceRecordSet{
+					Name: &recordName,
+					Type: route53types.RRTypeA,
 					TTL:  aws.Int64(recordTTL),
-					ResourceRecords: []*route53.ResourceRecord{
+					ResourceRecords: []route53types.ResourceRecord{
 						{
-							Value: aws.String(publicIp),
+							Value: &publicIp,
 						},
 					},
 				},
@@ -137,10 +139,12 @@ func (service *HelperService) updateDNS(ctx context.Context, recordName string, 
 		},
 	}
 
-	_, err = svc.ChangeResourceRecordSets(&route53.ChangeResourceRecordSetsInput{
+	input := &route53.ChangeResourceRecordSetsInput{
 		HostedZoneId: aws.String(hostedZoneId),
 		ChangeBatch:  changeBatch,
-	})
+	}
+
+	_, err = svc.ChangeResourceRecordSets(ctx, input)
 	if err != nil {
 		return &exceptions.WrappedError{
 			Error: err,
