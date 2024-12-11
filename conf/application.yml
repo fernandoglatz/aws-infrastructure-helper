@@ -1,0 +1,21 @@
+application:
+  dns-updater:
+    interval: 10s
+    public-ip-fetcher:
+      url: https://ipinfo.io/ip
+      timeout: 5s
+    record:
+      hosted-zone-id: Z2W4TJW8B6Z0T
+      name: example.com
+      ttl: 60
+
+aws:
+  credentials:
+    access-key: AKIAIOSFODNN7EXAMPLE
+    secret-key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  region: us-east-1
+
+log:
+  level: debug
+  format: TEXT
+  colored: true
