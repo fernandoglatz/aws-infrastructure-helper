@@ -1,13 +1,36 @@
 application:
   dns-updater:
-    interval: 10s
+    check-interval: 10s
     public-ip-fetcher:
       url: https://ipinfo.io/ip
       timeout: 5s
     record:
-      hosted-zone-id: Z2W4TJW8B6Z0T
+      hosted-zone-ids:
+        - Z2W4TJW8B6Z0T
+        - Z2W4TJW8B6Z1T
       name: example.com
       ttl: 60
+  isp-fallback-updater:
+    check-interval: 10s
+    port-fetcher:
+      url: https://another.example.com/status
+      host: example.com
+      timeout: 5s
+    record:
+      hosted-zone-ids:
+        - Z2W4TJW8B6Z0T
+      name: example.com
+      ttl: 60
+      value:
+        normal: another.example.com
+        fallback: another.example.net
+    cloudfront:
+      distribution-id: E1G2H3I4J5K6
+      origin:
+        normal: another.example.com
+        fallback: another.example.net
+    ec2:
+      auto-scaling-group-name: asg-name
 
 aws:
   credentials:

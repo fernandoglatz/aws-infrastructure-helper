@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -17,7 +18,7 @@ import (
 	"time"
 )
 
-func logRequest(ctx context.Context, request http.Request, requestBody []byte) {
+func logRequest(ctx *context.Context, request *http.Request, requestBody []byte) {
 	if log.IsLevelEnabled(log.DEBUG) {
 		requestBodyLength := len(requestBody)
 
@@ -35,9 +36,9 @@ func logRequest(ctx context.Context, request http.Request, requestBody []byte) {
 	}
 }
 
-func logResponse(ctx context.Context, start time.Time, end time.Time, response *http.Response, responseBody []byte) {
+func logResponse(ctx *context.Context, start *time.Time, end *time.Time, response *http.Response, responseBody []byte) {
 	if log.IsLevelEnabled(log.DEBUG) {
-		diff := end.Sub(start)
+		diff := end.Sub(*start)
 
 		log.Debug(ctx).Msg(fmt.Sprintf("<--- %s %s (%s)", response.Proto, response.Status, diff))
 		for headerName, headerValues := range response.Header {
@@ -50,9 +51,16 @@ func logResponse(ctx context.Context, start time.Time, end time.Time, response *
 	}
 }
 
-func executeRequest(ctx context.Context, method string, requestUrl string, timeout time.Duration, headers map[string]string, requestDTO any, responseDTO any) *exceptions.ApiError {
+func executeRequest(ctx *context.Context, method string, requestUrl string, timeout time.Duration, headers *map[string]string, requestDTO any, responseDTO any) *exceptions.ApiError {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
 	client := &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 	}
 
 	var requestBody []byte
@@ -60,7 +68,7 @@ func executeRequest(ctx context.Context, method string, requestUrl string, timeo
 	var err error
 
 	if requestDTO != nil {
-		contentType := headers["Content-Type"]
+		contentType := (*headers)["Content-Type"]
 
 		if strings.Contains(contentType, "/xml") {
 			requestBody, err = xml.Marshal(requestDTO)
@@ -94,19 +102,23 @@ func executeRequest(ctx context.Context, method string, requestUrl string, timeo
 		}
 	}
 
-	if requestDTO != nil && utils.IsEmptyStr(headers["Content-Type"]) {
+	if requestDTO != nil && utils.IsEmptyStr((*headers)["Content-Type"]) {
 		request.Header.Set("Content-Type", "application/json")
 	}
 
-	if utils.IsEmptyStr(headers["Accept"]) {
+	if utils.IsEmptyStr((*headers)["Accept"]) {
 		request.Header.Set("Accept", "application/json")
 	}
 
-	for key, value := range headers {
+	for key, value := range *headers {
 		request.Header.Set(key, value)
+
+		if key == "Host" {
+			request.Host = value
+		}
 	}
 
-	logRequest(ctx, *request, requestBody)
+	logRequest(ctx, request, requestBody)
 
 	start := time.Now()
 	response, err := client.Do(request)
@@ -133,7 +145,7 @@ func executeRequest(ctx context.Context, method string, requestUrl string, timeo
 	}
 
 	end := time.Now()
-	logResponse(ctx, start, end, response, responseBody)
+	logResponse(ctx, &start, &end, response, responseBody)
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		apiError := &exceptions.ApiError{

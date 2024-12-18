@@ -20,7 +20,7 @@ type Config struct {
 
 	Application struct {
 		DNSUpdater struct {
-			Interval time.Duration `yaml:"interval"`
+			CheckInterval time.Duration `yaml:"check-interval"`
 
 			PublicIPFetcher struct {
 				Url     string        `yaml:"url"`
@@ -28,11 +28,43 @@ type Config struct {
 			} `yaml:"public-ip-fetcher"`
 
 			Record struct {
-				HostedZoneId string `yaml:"hosted-zone-id"`
-				Name         string `yaml:"name"`
-				TTL          int64  `yaml:"ttl"`
+				HostedZoneIds []string `yaml:"hosted-zone-ids"`
+				Name          string   `yaml:"name"`
+				TTL           int64    `yaml:"ttl"`
 			} `yaml:"record"`
 		} `yaml:"dns-updater"`
+
+		ISPFallbackUpdater struct {
+			CheckInterval time.Duration `yaml:"check-interval"`
+
+			PortFetcher struct {
+				Url     string        `yaml:"url"`
+				Host    string        `yaml:"host"`
+				Timeout time.Duration `yaml:"timeout"`
+			} `yaml:"port-fetcher"`
+
+			Record struct {
+				HostedZoneIds []string `yaml:"hosted-zone-ids"`
+				Name          string   `yaml:"name"`
+				TTL           int64    `yaml:"ttl"`
+				Value         struct {
+					Normal   string `yaml:"normal"`
+					Fallback string `yaml:"fallback"`
+				} `yaml:"value"`
+			} `yaml:"record"`
+
+			Cloudfront struct {
+				DistributionId string `yaml:"distribution-id"`
+				Origin         struct {
+					Normal   string `yaml:"normal"`
+					Fallback string `yaml:"fallback"`
+				} `yaml:"origin"`
+			} `yaml:"cloudfront"`
+
+			EC2 struct {
+				AutoScalingGroupName string `yaml:"auto-scaling-group-name"`
+			} `yaml:"ec2"`
+		} `yaml:"isp-fallback-updater"`
 	} `yaml:"application"`
 
 	Aws struct {
@@ -51,16 +83,9 @@ type Config struct {
 	} `yaml:"log"`
 }
 
-type Queue struct {
-	Name                 string        `yaml:"name"`
-	MaximumReceives      int           `yaml:"maximum-receives"`
-	RequeueDelay         time.Duration `yaml:"requeue-delay"`
-	RequeueDelayExchange string        `yaml:"requeue-delay-exchange"`
-}
-
 var ApplicationConfig Config
 
-func LoadConfig(ctx context.Context) error {
+func LoadConfig(ctx *context.Context) error {
 	loadProfile(ctx)
 
 	err := loadLocalConfig(ctx)
@@ -79,7 +104,7 @@ func IsDevProfile() bool {
 	return constants.DEV_PROFILE == profile
 }
 
-func loadProfile(ctx context.Context) {
+func loadProfile(ctx *context.Context) {
 	profile := os.Getenv(constants.PROFILE)
 	if len(profile) == constants.ZERO {
 		profile = constants.DEV_PROFILE
@@ -90,7 +115,7 @@ func loadProfile(ctx context.Context) {
 	log.Info(ctx).Msg("Profile loaded: " + profile)
 }
 
-func loadLocalConfig(ctx context.Context) error {
+func loadLocalConfig(ctx *context.Context) error {
 	log.Info(ctx).Msg("Loading local config")
 
 	data, err := os.ReadFile("conf/application.yml")

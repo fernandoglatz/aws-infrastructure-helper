@@ -57,7 +57,7 @@ func SetupLogger(profile string) {
 	}
 }
 
-func HandlePanic(ctx context.Context) {
+func HandlePanic(ctx *context.Context) {
 	if recover := recover(); recover != nil {
 		caller := constants.EMPTY
 
@@ -90,7 +90,7 @@ func getStackTrace() string {
 	}
 }
 
-func ReconfigureLogger(ctx context.Context, configFormat format.Format, level string, colored bool) {
+func ReconfigureLogger(ctx *context.Context, configFormat format.Format, level string, colored bool) {
 	Info(ctx).Msg("Reconfiguring logger for level: " + strings.ToUpper(level))
 	setCurrentLevel(level)
 
@@ -162,7 +162,7 @@ func (loggerEvent LoggerEvent) Caller(caller string) LoggerEvent {
 	return loggerEvent
 }
 
-func (loggerEvent LoggerEvent) Wrap(err exceptions.WrappedError) {
+func (loggerEvent LoggerEvent) Wrap(err *exceptions.WrappedError) {
 	if IsLevelEnabled(loggerEvent.level) {
 		message := err.GetMessage()
 		loggerEvent.Msg(message)
@@ -198,37 +198,37 @@ func (loggerEvent LoggerEvent) Msg(msg string) {
 	}
 }
 
-func Trace(ctx context.Context) LoggerEvent {
+func Trace(ctx *context.Context) LoggerEvent {
 	return CreateLoggerEvent(ctx, zlog.Trace(), TRACE)
 }
 
-func Debug(ctx context.Context) LoggerEvent {
+func Debug(ctx *context.Context) LoggerEvent {
 	return CreateLoggerEvent(ctx, zlog.Debug(), DEBUG)
 }
 
-func Info(ctx context.Context) LoggerEvent {
+func Info(ctx *context.Context) LoggerEvent {
 	return CreateLoggerEvent(ctx, zlog.Info(), INFO)
 }
 
-func Warn(ctx context.Context) LoggerEvent {
+func Warn(ctx *context.Context) LoggerEvent {
 	return CreateLoggerEvent(ctx, zlog.Warn(), WARN)
 }
 
-func Error(ctx context.Context) LoggerEvent {
+func Error(ctx *context.Context) LoggerEvent {
 	return CreateLoggerEvent(ctx, zlog.Error(), ERROR)
 }
 
-func Fatal(ctx context.Context) LoggerEvent {
+func Fatal(ctx *context.Context) LoggerEvent {
 	return CreateLoggerEvent(ctx, zlog.Fatal(), FATAL)
 }
 
-func CreateLoggerEvent(ctx context.Context, event *zerolog.Event, level Level) LoggerEvent {
+func CreateLoggerEvent(ctx *context.Context, event *zerolog.Event, level Level) LoggerEvent {
 	loggerEvent := LoggerEvent{
 		event: event,
 		level: level,
 	}
 
-	traceObj := ctx.Value(constants.TRACE_MAP)
+	traceObj := (*ctx).Value(constants.TRACE_MAP)
 	if traceObj != nil {
 		loggerEvent.traceMap = traceObj.(map[string]any)
 	} else {

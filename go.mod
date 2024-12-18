@@ -3,9 +3,11 @@ module fernandoglatz/aws-infrastructure-helper
 go 1.21
 
 require (
-	github.com/aws/aws-sdk-go v1.55.5
+	github.com/aws/aws-sdk-go-v2 v1.32.6
 	github.com/aws/aws-sdk-go-v2/config v1.28.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.47
+	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.51.1
+	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.44.0
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.46.3
 	github.com/joho/godotenv v1.5.1
 	github.com/rs/zerolog v1.33.0
@@ -13,7 +15,6 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.32.6 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.21 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.25 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.25 // indirect

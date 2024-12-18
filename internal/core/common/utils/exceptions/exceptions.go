@@ -33,7 +33,7 @@ type ApiError struct {
 	Status       int
 }
 
-func (apiError ApiError) ToWrappedError(ctx context.Context) *WrappedError {
+func (apiError ApiError) ToWrappedError(ctx *context.Context) *WrappedError {
 	baseError := BaseError{
 		Code:       constants.API_ERROR,
 		Message:    "Error calling API.",

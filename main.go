@@ -14,15 +14,21 @@ func main() {
 	ctx := context.Background()
 	godotenv.Load()
 
-	err := config.LoadConfig(ctx)
+	err := config.LoadConfig(&ctx)
 	if err != nil {
-		log.Fatal(ctx).Msg(err.Error())
+		log.Fatal(&ctx).Msg(err.Error())
 	}
 
 	helperService := service.NewHelperService()
-	err = helperService.ScheduleDNSCheck(ctx)
+
+	err = helperService.ScheduleDNSUpdater(&ctx)
 	if err != nil {
-		log.Fatal(ctx).Msg(err.Error())
+		log.Fatal(&ctx).Msg(err.Error())
+	}
+
+	err = helperService.ScheduleISPFallback(&ctx)
+	if err != nil {
+		log.Fatal(&ctx).Msg(err.Error())
 	}
 
 	select {}
