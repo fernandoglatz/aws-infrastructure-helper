@@ -272,7 +272,6 @@ func (service *HelperService) changeISPFallback(ctx *context.Context, fallback b
 	}
 
 	if fallback {
-		service.autoScalingGroupShutdownTime = nil
 		recordValue = ispFallbackUpdater.Record.Value.Fallback
 		distributionOrigin = ispFallbackUpdater.Cloudfront.Origin.Fallback
 
