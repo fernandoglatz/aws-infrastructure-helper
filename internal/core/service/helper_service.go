@@ -289,6 +289,8 @@ func (service *HelperService) changeISPFallback(ctx *context.Context, fallback b
 		futureTime := time.Now().Add(autoScalingGroupShutdownTime)
 		service.autoScalingGroupShutdownTime = &futureTime
 
+		log.Info(ctx).Msg(fmt.Sprintf("Shutting down auto scaling group %s at %s", autoscalingGroupName, futureTime))
+
 		errw = service.updateCloudfrontDistribution(ctx, awsConfig, distributionId, distributionOrigin)
 		if errw != nil {
 			return errw
