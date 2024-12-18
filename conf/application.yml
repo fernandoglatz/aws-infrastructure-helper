@@ -30,7 +30,9 @@ application:
         normal: another.example.com
         fallback: another.example.net
     ec2:
-      auto-scaling-group-name: asg-name
+      auto-scaling-group:
+        name: asg-name
+        shutdown-time: 5m
 
 aws:
   credentials:

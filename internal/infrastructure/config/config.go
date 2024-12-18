@@ -62,7 +62,10 @@ type Config struct {
 			} `yaml:"cloudfront"`
 
 			EC2 struct {
-				AutoScalingGroupName string `yaml:"auto-scaling-group-name"`
+				AutoScalingGroup struct {
+					Name         string        `yaml:"name"`
+					ShutdownTime time.Duration `yaml:"shutdown-time"`
+				} `yaml:"auto-scaling-group"`
 			} `yaml:"ec2"`
 		} `yaml:"isp-fallback-updater"`
 	} `yaml:"application"`

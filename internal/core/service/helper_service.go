@@ -21,8 +21,9 @@ import (
 )
 
 type HelperService struct {
-	fetcherApi  *api.FetcherApi
-	ispFallback *bool
+	fetcherApi                   *api.FetcherApi
+	ispFallback                  *bool
+	autoScalingGroupShutdownTime *time.Time
 }
 
 func NewHelperService() *HelperService {
@@ -81,6 +82,7 @@ func (service *HelperService) ScheduleDNSUpdater(ctx *context.Context) error {
 func (service *HelperService) ScheduleISPFallback(ctx *context.Context) error {
 	ispFallbackUpdater := config.ApplicationConfig.Application.ISPFallbackUpdater
 	checkInterval := ispFallbackUpdater.CheckInterval
+	autoscalingGroupName := ispFallbackUpdater.EC2.AutoScalingGroup.Name
 
 	go func() {
 		ticker := time.NewTicker(checkInterval)
@@ -114,6 +116,22 @@ func (service *HelperService) ScheduleISPFallback(ctx *context.Context) error {
 				log.Info(ctx).Msg("ISP ports are closed")
 			} else {
 				log.Info(ctx).Msg("ISP ports are open")
+			}
+
+			if service.autoScalingGroupShutdownTime != nil && time.Now().After(*service.autoScalingGroupShutdownTime) {
+				awsConfig, errw := service.getAWSConfig(ctx)
+				if errw != nil {
+					log.Error(ctx).Msg(fmt.Sprintf("Error on getting AWS config: %v", errw.GetMessage()))
+					return
+				}
+
+				errw = service.updateAutoScallingGroup(ctx, awsConfig, autoscalingGroupName, constants.ZERO)
+				if errw != nil {
+					log.Error(ctx).Msg(fmt.Sprintf("Error on shutting down Auto Scaling Group: %v", errw.GetMessage()))
+					return
+				}
+
+				service.autoScalingGroupShutdownTime = nil
 			}
 		}
 	}()
@@ -243,7 +261,8 @@ func (service *HelperService) changeISPFallback(ctx *context.Context, fallback b
 	recordValue := ispFallbackUpdater.Record.Value.Normal
 	recordTTL := ispFallbackUpdater.Record.TTL
 	rrType := route53types.RRTypeCname
-	autoscalingGroupName := ispFallbackUpdater.EC2.AutoScalingGroupName
+	autoscalingGroupName := ispFallbackUpdater.EC2.AutoScalingGroup.Name
+	autoScalingGroupShutdownTime := ispFallbackUpdater.EC2.AutoScalingGroup.ShutdownTime
 	distributionId := ispFallbackUpdater.Cloudfront.DistributionId
 	distributionOrigin := ispFallbackUpdater.Cloudfront.Origin.Normal
 
@@ -253,6 +272,7 @@ func (service *HelperService) changeISPFallback(ctx *context.Context, fallback b
 	}
 
 	if fallback {
+		service.autoScalingGroupShutdownTime = nil
 		recordValue = ispFallbackUpdater.Record.Value.Fallback
 		distributionOrigin = ispFallbackUpdater.Cloudfront.Origin.Fallback
 
@@ -267,10 +287,8 @@ func (service *HelperService) changeISPFallback(ctx *context.Context, fallback b
 		}
 
 	} else {
-		errw = service.updateAutoScallingGroup(ctx, awsConfig, autoscalingGroupName, constants.ZERO)
-		if errw != nil {
-			return errw
-		}
+		futureTime := time.Now().Add(autoScalingGroupShutdownTime)
+		service.autoScalingGroupShutdownTime = &futureTime
 
 		errw = service.updateCloudfrontDistribution(ctx, awsConfig, distributionId, distributionOrigin)
 		if errw != nil {
@@ -288,6 +306,8 @@ func (service *HelperService) changeISPFallback(ctx *context.Context, fallback b
 }
 
 func (service *HelperService) updateAutoScallingGroup(ctx *context.Context, awsConfig *aws.Config, autoscalingGroupName string, desired int32) *exceptions.WrappedError {
+	log.Info(ctx).Msg(fmt.Sprintf("Updating auto scaling group %s to desired capacity %d", autoscalingGroupName, desired))
+
 	client := autoscaling.NewFromConfig(*awsConfig)
 	input := &autoscaling.UpdateAutoScalingGroupInput{
 		AutoScalingGroupName: aws.String(autoscalingGroupName),
@@ -302,6 +322,8 @@ func (service *HelperService) updateAutoScallingGroup(ctx *context.Context, awsC
 			Error: err,
 		}
 	}
+
+	log.Info(ctx).Msg(fmt.Sprintf("Updated auto scaling group %s to desired capacity %d", autoscalingGroupName, desired))
 
 	return nil
 }
