@@ -2,8 +2,10 @@ application:
   dns-updater:
     check-interval: 10s
     public-ip-fetcher:
-      url: https://ipinfo.io/ip
-      timeout: 5s
+      - url: https://ipinfo.io/ip
+        timeout: 5s
+      - url: https://api.ipify.org
+        timeout: 5s
     record:
       hosted-zone-ids:
         - Z2W4TJW8B6Z0T
