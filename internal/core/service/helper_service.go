@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fernandoglatz/aws-infrastructure-helper/internal/core/common/utils/constants"
 	"fernandoglatz/aws-infrastructure-helper/internal/core/common/utils/exceptions"
 	"fernandoglatz/aws-infrastructure-helper/internal/core/common/utils/log"
@@ -9,70 +10,80 @@ import (
 	"fernandoglatz/aws-infrastructure-helper/internal/infrastructure/config"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
-	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
-	"github.com/aws/aws-sdk-go-v2/service/route53"
 	route53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 )
 
+const (
+	DEFAULT_FAILURE_THRESHOLD     = 3
+	DEFAULT_DNS_FAILURE_THRESHOLD = 30
+)
+
+type fetcher interface {
+	GetPublicIp(ctx *context.Context) (string, *exceptions.ApiError)
+	Fetch(ctx *context.Context) *exceptions.ApiError
+}
+
 type HelperService struct {
-	fetcherApi                   *api.FetcherApi
+	fetcher  fetcher
+	cloud    cloudGateway
+	lookupIP func(host string) ([]net.IP, error)
+	now      func() time.Time
+
 	ispFallback                  *bool
 	autoScalingGroupShutdownTime *time.Time
+
+	// Consecutive failed ISP checks of any kind, and how many of them were not DNS failures.
+	failureStreak           int
+	connectionFailureStreak int
 }
 
 func NewHelperService() *HelperService {
-	fetcherApi := api.NewFetcherApi()
-
 	return &HelperService{
-		fetcherApi: fetcherApi,
+		fetcher:  api.NewFetcherApi(),
+		cloud:    &awsGateway{},
+		lookupIP: net.LookupIP,
+		now:      time.Now,
 	}
 }
 
+func failureThreshold() int {
+	threshold := config.ApplicationConfig.Application.ISPFallbackUpdater.FailureThreshold
+	if threshold <= constants.ZERO {
+		return DEFAULT_FAILURE_THRESHOLD
+	}
+	return threshold
+}
+
+func dnsFailureThreshold() int {
+	threshold := config.ApplicationConfig.Application.ISPFallbackUpdater.DNSFailureThreshold
+	if threshold <= constants.ZERO {
+		return DEFAULT_DNS_FAILURE_THRESHOLD
+	}
+	return threshold
+}
+
+// isDNSError reports whether the request failed while resolving the host name.
+func isDNSError(apiError *exceptions.ApiError) bool {
+	if apiError == nil || apiError.Err == nil {
+		return false
+	}
+
+	var dnsError *net.DNSError
+	return errors.As(apiError.Err, &dnsError)
+}
+
 func (service *HelperService) ScheduleDNSUpdater(ctx *context.Context) error {
-	dnsUpdater := config.ApplicationConfig.Application.DNSUpdater
-	hostedZoneIds := dnsUpdater.Record.HostedZoneIds
-	recordTTL := dnsUpdater.Record.TTL
-	recordName := dnsUpdater.Record.Name
-	checkInterval := dnsUpdater.CheckInterval
+	checkInterval := config.ApplicationConfig.Application.DNSUpdater.CheckInterval
 
 	go func() {
 		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			log.Info(ctx).Msg("Checking DNS...")
-
-			changed, publicIp, errw := service.isDnsChanged(ctx, recordName)
-			if errw != nil {
-				log.Error(ctx).Msg(fmt.Sprintf("Error on checking DNS: %v", errw.GetMessage()))
-			}
-
-			if changed || errw != nil {
-				awsConfig, errw := service.getAWSConfig(ctx)
-				if errw != nil {
-					log.Error(ctx).Msg(fmt.Sprintf("Error on getting AWS config: %v", errw.GetMessage()))
-					return
-				}
-
-				client := route53.NewFromConfig(*awsConfig)
-				rrType := route53types.RRTypeA
-
-				for _, hostedZoneId := range hostedZoneIds {
-					errw := service.updateDNS(ctx, client, hostedZoneId, recordName, publicIp, rrType, recordTTL)
-					if errw != nil {
-						log.Error(ctx).Msg(fmt.Sprintf("Error on updating DNS: %v", errw.GetMessage()))
-					}
-				}
-
-			} else {
-				log.Info(ctx).Msg(fmt.Sprintf("DNS %s is up to date with public IP %s", recordName, publicIp))
-			}
+			service.checkDNS(ctx)
 		}
 	}()
 
@@ -80,284 +91,203 @@ func (service *HelperService) ScheduleDNSUpdater(ctx *context.Context) error {
 }
 
 func (service *HelperService) ScheduleISPFallback(ctx *context.Context) error {
-	ispFallbackUpdater := config.ApplicationConfig.Application.ISPFallbackUpdater
-	checkInterval := ispFallbackUpdater.CheckInterval
-	autoscalingGroupName := ispFallbackUpdater.EC2.AutoScalingGroup.Name
+	checkInterval := config.ApplicationConfig.Application.ISPFallbackUpdater.CheckInterval
 
 	go func() {
 		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			log.Info(ctx).Msg("Checking ISP ports...")
-
-			closed := service.isPortClosed(ctx)
-
-			if (service.ispFallback == nil || *service.ispFallback) && !closed {
-				errw := service.disableISPFallback(ctx)
-				if errw != nil {
-					log.Error(ctx).Msg(fmt.Sprintf("Error on disabling ISP fallback: %v", errw.GetMessage()))
-					service.ispFallback = nil
-				} else {
-					pointer := false
-					service.ispFallback = &pointer
-				}
-
-			} else if (service.ispFallback == nil || !*service.ispFallback) && closed {
-				errw := service.enableISPFallback(ctx)
-				if errw != nil {
-					log.Error(ctx).Msg(fmt.Sprintf("Error on enabling ISP fallback: %v", errw.GetMessage()))
-					service.ispFallback = nil
-				} else {
-					pointer := true
-					service.ispFallback = &pointer
-				}
-			} else if closed {
-				log.Info(ctx).Msg("ISP ports are closed")
-			} else {
-				log.Info(ctx).Msg("ISP ports are open")
-			}
-
-			if service.autoScalingGroupShutdownTime != nil && time.Now().After(*service.autoScalingGroupShutdownTime) {
-				awsConfig, errw := service.getAWSConfig(ctx)
-				if errw != nil {
-					log.Error(ctx).Msg(fmt.Sprintf("Error on getting AWS config: %v", errw.GetMessage()))
-					return
-				}
-
-				errw = service.updateAutoScallingGroup(ctx, awsConfig, autoscalingGroupName, constants.ZERO)
-				if errw != nil {
-					log.Error(ctx).Msg(fmt.Sprintf("Error on shutting down Auto Scaling Group: %v", errw.GetMessage()))
-					return
-				}
-
-				service.autoScalingGroupShutdownTime = nil
-			}
+			service.checkISP(ctx)
 		}
 	}()
 
 	return nil
 }
 
-func (service *HelperService) isDnsChanged(ctx *context.Context, domainName string) (bool, string, *exceptions.WrappedError) {
-	publicIp, erra := service.fetcherApi.GetPublicIp(ctx)
+// checkDNS keeps the public record pointing to the current public IP.
+func (service *HelperService) checkDNS(ctx *context.Context) {
+	dnsUpdater := config.ApplicationConfig.Application.DNSUpdater
+	recordName := dnsUpdater.Record.Name
+
+	log.Info(ctx).Msg("Checking DNS...")
+
+	publicIp, erra := service.fetcher.GetPublicIp(ctx)
 	if erra != nil {
-		return false, publicIp, erra.ToWrappedError(ctx)
+		log.Error(ctx).Msg(fmt.Sprintf("Error on fetching public IP, skipping DNS update: %s (status %d)", erra.Message, erra.Status))
+		return
 	}
 
-	resolvedIp, errw := service.resolveDNS(ctx, domainName)
+	publicIp = strings.TrimSpace(publicIp)
+	parsedIp := net.ParseIP(publicIp)
+	if parsedIp == nil || parsedIp.To4() == nil {
+		log.Error(ctx).Msg(fmt.Sprintf("Invalid public IPv4 %q, skipping DNS update", publicIp))
+		return
+	}
+
+	resolvedIp, errw := service.resolveDNS(recordName)
 	if errw != nil {
-		return false, publicIp, errw
-	}
-
-	if publicIp != resolvedIp {
+		log.Warn(ctx).Msg(fmt.Sprintf("Error on resolving %s, updating it anyway: %v", recordName, errw.GetMessage()))
+	} else if resolvedIp == publicIp {
+		log.Info(ctx).Msg(fmt.Sprintf("DNS %s is up to date with public IP %s", recordName, publicIp))
+		return
+	} else {
 		log.Info(ctx).Msg(fmt.Sprintf("Public IP changed from %s to %s", resolvedIp, publicIp))
-		return true, publicIp, nil
 	}
 
-	return false, publicIp, nil
+	errw = service.upsertRecords(ctx, dnsUpdater.Record.HostedZoneIds, recordName, publicIp, route53types.RRTypeA, dnsUpdater.Record.TTL)
+	if errw != nil {
+		log.Error(ctx).Msg(fmt.Sprintf("Error on updating DNS: %v", errw.GetMessage()))
+	}
 }
 
-func (service *HelperService) resolveDNS(ctx *context.Context, domainName string) (string, *exceptions.WrappedError) {
-	log.Info(ctx).Msg(fmt.Sprintf("Resolving DNS for domain name: %s", domainName))
-
-	ips, err := net.LookupIP(domainName)
+// resolveDNS returns the first IPv4 address of the domain name.
+func (service *HelperService) resolveDNS(domainName string) (string, *exceptions.WrappedError) {
+	ips, err := service.lookupIP(domainName)
 	if err != nil {
-		return "", &exceptions.WrappedError{
+		return constants.EMPTY, &exceptions.WrappedError{
 			Error: err,
 		}
 	}
 
-	return ips[constants.ZERO].String(), nil
-}
-
-func (service *HelperService) updateDNS(ctx *context.Context, client *route53.Client, hostedZoneId string, recordName string, value string, rrtype route53types.RRType, ttl int64) *exceptions.WrappedError {
-	log.Info(ctx).Msg(fmt.Sprintf("Updating DNS %s with value %s for hosted zone %s", recordName, value, hostedZoneId))
-
-	changeBatch := &route53types.ChangeBatch{
-		Changes: []route53types.Change{
-			{
-				Action: route53types.ChangeActionUpsert,
-				ResourceRecordSet: &route53types.ResourceRecordSet{
-					Name: &recordName,
-					Type: rrtype,
-					TTL:  aws.Int64(ttl),
-					ResourceRecords: []route53types.ResourceRecord{
-						{
-							Value: &value,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	input := &route53.ChangeResourceRecordSetsInput{
-		HostedZoneId: aws.String(hostedZoneId),
-		ChangeBatch:  changeBatch,
-	}
-
-	_, err := client.ChangeResourceRecordSets(*ctx, input)
-	if err != nil {
-		return &exceptions.WrappedError{
-			Error: err,
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip.String(), nil
 		}
 	}
 
-	log.Info(ctx).Msg(fmt.Sprintf("DNS record for %s updated with value: %s", recordName, value))
-	return nil
+	return constants.EMPTY, &exceptions.WrappedError{
+		Message: fmt.Sprintf("no IPv4 address found for %s", domainName),
+	}
 }
 
-func (service *HelperService) getAWSConfig(ctx *context.Context) (*aws.Config, *exceptions.WrappedError) {
-	awsConfig := config.ApplicationConfig.Aws
-	accessKey := awsConfig.Credentials.AccessKey
-	secretKey := awsConfig.Credentials.SecretKey
-	region := awsConfig.Region
+// checkISP probes the home ISP and toggles the AWS fallback. A single failed probe is
+// not enough: the fallback is enabled only after consecutive failures.
+func (service *HelperService) checkISP(ctx *context.Context) {
+	log.Info(ctx).Msg("Checking ISP ports...")
 
-	cfg, err := awsconfig.LoadDefaultConfig(*ctx,
-		awsconfig.WithRegion(region),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
-	)
-	if err != nil {
-		return nil, &exceptions.WrappedError{
-			Error: err,
+	erra := service.fetcher.Fetch(ctx)
+	// Any HTTP response, even an error status, means the ISP link is up.
+	reachable := erra == nil || erra.Status != constants.ZERO
+
+	if reachable {
+		service.failureStreak = constants.ZERO
+		service.connectionFailureStreak = constants.ZERO
+
+		if service.ispFallback == nil || *service.ispFallback {
+			service.setISPFallback(ctx, false)
+		} else {
+			log.Info(ctx).Msg("ISP ports are open")
+		}
+
+	} else {
+		service.failureStreak++
+		if !isDNSError(erra) {
+			service.connectionFailureStreak++
+		}
+
+		if service.ispFallback != nil && *service.ispFallback {
+			log.Info(ctx).Msg("ISP ports are closed")
+
+		} else if service.connectionFailureStreak >= failureThreshold() || service.failureStreak >= dnsFailureThreshold() {
+			service.setISPFallback(ctx, true)
+
+		} else {
+			log.Warn(ctx).Msg(fmt.Sprintf("ISP check failed (%d consecutive, %d connection failures, thresholds %d/%d), not enabling fallback yet",
+				service.failureStreak, service.connectionFailureStreak, failureThreshold(), dnsFailureThreshold()))
 		}
 	}
 
-	return &cfg, nil
+	service.shutdownAutoScalingGroupIfDue(ctx)
 }
 
-func (service *HelperService) isPortClosed(ctx *context.Context) bool {
-	erra := service.fetcherApi.Fetch(ctx)
-	return erra != nil && erra.Status == constants.ZERO
-}
-
-func (service *HelperService) enableISPFallback(ctx *context.Context) *exceptions.WrappedError {
-	log.Info(ctx).Msg("Enabling ISP fallback")
-
-	errw := service.changeISPFallback(ctx, true)
-	if errw == nil {
-		log.Info(ctx).Msg("ISP fallback enabled")
+func (service *HelperService) setISPFallback(ctx *context.Context, fallback bool) {
+	action, state := "disabling", "disabled"
+	if fallback {
+		action, state = "enabling", "enabled"
 	}
 
-	return errw
-}
+	log.Info(ctx).Msg(fmt.Sprintf("ISP fallback: %s", action))
 
-func (service *HelperService) disableISPFallback(ctx *context.Context) *exceptions.WrappedError {
-	log.Info(ctx).Msg("Disabling ISP fallback")
-
-	errw := service.changeISPFallback(ctx, false)
-	if errw == nil {
-		log.Info(ctx).Msg("ISP fallback disabled")
+	errw := service.changeISPFallback(ctx, fallback)
+	if errw != nil {
+		log.Error(ctx).Msg(fmt.Sprintf("Error on %s ISP fallback: %v", action, errw.GetMessage()))
+		// Unknown state: retried on the next check.
+		service.ispFallback = nil
+		return
 	}
 
-	return errw
+	service.ispFallback = &fallback
+	log.Info(ctx).Msg(fmt.Sprintf("ISP fallback %s", state))
 }
 
 func (service *HelperService) changeISPFallback(ctx *context.Context, fallback bool) *exceptions.WrappedError {
 	ispFallbackUpdater := config.ApplicationConfig.Application.ISPFallbackUpdater
-	hostedZoneIds := ispFallbackUpdater.Record.HostedZoneIds
-	recordName := ispFallbackUpdater.Record.Name
-	recordValue := ispFallbackUpdater.Record.Value.Normal
-	recordTTL := ispFallbackUpdater.Record.TTL
-	rrType := route53types.RRTypeCname
-	autoscalingGroupName := ispFallbackUpdater.EC2.AutoScalingGroup.Name
-	autoScalingGroupShutdownTime := ispFallbackUpdater.EC2.AutoScalingGroup.ShutdownTime
-	distributionId := ispFallbackUpdater.Cloudfront.DistributionId
-	distributionOrigin := ispFallbackUpdater.Cloudfront.Origin.Normal
+	record := ispFallbackUpdater.Record
+	autoScalingGroup := ispFallbackUpdater.EC2.AutoScalingGroup
+	cloudfront := ispFallbackUpdater.Cloudfront
 
-	awsConfig, errw := service.getAWSConfig(ctx)
-	if errw != nil {
-		return errw
-	}
+	recordValue := record.Value.Normal
+	distributionOrigin := cloudfront.Origin.Normal
 
 	if fallback {
-		recordValue = ispFallbackUpdater.Record.Value.Fallback
-		distributionOrigin = ispFallbackUpdater.Cloudfront.Origin.Fallback
+		recordValue = record.Value.Fallback
+		distributionOrigin = cloudfront.Origin.Fallback
 
-		errw = service.updateAutoScallingGroup(ctx, awsConfig, autoscalingGroupName, constants.ONE)
-		if errw != nil {
-			return errw
-		}
+		// A shutdown left over from a previous recovery must not stop the instance we need now.
+		service.autoScalingGroupShutdownTime = nil
 
-		errw = service.updateCloudfrontDistribution(ctx, awsConfig, distributionId, distributionOrigin)
+		errw := service.cloud.UpdateAutoScalingGroup(ctx, autoScalingGroup.Name, constants.ONE)
 		if errw != nil {
 			return errw
 		}
 
 	} else {
-		futureTime := time.Now().Add(autoScalingGroupShutdownTime)
-		service.autoScalingGroupShutdownTime = &futureTime
+		shutdownTime := service.now().Add(autoScalingGroup.ShutdownTime)
+		service.autoScalingGroupShutdownTime = &shutdownTime
 
-		log.Info(ctx).Msg(fmt.Sprintf("Shutting down auto scaling group %s at %s", autoscalingGroupName, futureTime))
-
-		errw = service.updateCloudfrontDistribution(ctx, awsConfig, distributionId, distributionOrigin)
-		if errw != nil {
-			return errw
-		}
+		log.Info(ctx).Msg(fmt.Sprintf("Shutting down auto scaling group %s at %s", autoScalingGroup.Name, shutdownTime))
 	}
 
-	client := route53.NewFromConfig(*awsConfig)
-	for _, hostedZoneId := range hostedZoneIds {
-		errw := service.updateDNS(ctx, client, hostedZoneId, recordName, recordValue, rrType, recordTTL)
+	errw := service.cloud.UpdateCloudfrontOrigin(ctx, cloudfront.DistributionId, distributionOrigin)
+	if errw != nil {
 		return errw
 	}
 
-	return nil
+	return service.upsertRecords(ctx, record.HostedZoneIds, record.Name, recordValue, route53types.RRTypeCname, record.TTL)
 }
 
-func (service *HelperService) updateAutoScallingGroup(ctx *context.Context, awsConfig *aws.Config, autoscalingGroupName string, desired int32) *exceptions.WrappedError {
-	log.Info(ctx).Msg(fmt.Sprintf("Updating auto scaling group %s to desired capacity %d", autoscalingGroupName, desired))
+// upsertRecords updates the record in every hosted zone, returning the first error.
+func (service *HelperService) upsertRecords(ctx *context.Context, hostedZoneIds []string, name string, value string, rrType route53types.RRType, ttl int64) *exceptions.WrappedError {
+	var firstError *exceptions.WrappedError
 
-	client := autoscaling.NewFromConfig(*awsConfig)
-	input := &autoscaling.UpdateAutoScalingGroupInput{
-		AutoScalingGroupName: aws.String(autoscalingGroupName),
-		MinSize:              aws.Int32(desired),
-		MaxSize:              aws.Int32(desired),
-		DesiredCapacity:      aws.Int32(desired),
-	}
-
-	_, err := client.UpdateAutoScalingGroup(*ctx, input)
-	if err != nil {
-		return &exceptions.WrappedError{
-			Error: err,
+	for _, hostedZoneId := range hostedZoneIds {
+		errw := service.cloud.UpsertRecord(ctx, hostedZoneId, name, value, rrType, ttl)
+		if errw != nil {
+			log.Error(ctx).Msg(fmt.Sprintf("Error on updating DNS %s for hosted zone %s: %v", name, hostedZoneId, errw.GetMessage()))
+			if firstError == nil {
+				firstError = errw
+			}
 		}
 	}
 
-	log.Info(ctx).Msg(fmt.Sprintf("Updated auto scaling group %s to desired capacity %d", autoscalingGroupName, desired))
-
-	return nil
+	return firstError
 }
 
-func (service *HelperService) updateCloudfrontDistribution(ctx *context.Context, awsConfig *aws.Config, distributionId string, origin string) *exceptions.WrappedError {
-	client := cloudfront.NewFromConfig(*awsConfig)
-
-	getInput := &cloudfront.GetDistributionConfigInput{
-		Id: aws.String(distributionId),
+// shutdownAutoScalingGroupIfDue scales the group down once the shutdown time has passed.
+// On failure the shutdown stays pending and is retried on the next check.
+func (service *HelperService) shutdownAutoScalingGroupIfDue(ctx *context.Context) {
+	if service.autoScalingGroupShutdownTime == nil || !service.now().After(*service.autoScalingGroupShutdownTime) {
+		return
 	}
 
-	getDistributionConfigOutput, err := client.GetDistributionConfig(*ctx, getInput)
-	if err != nil {
-		return &exceptions.WrappedError{
-			Error: err,
-		}
+	autoScalingGroupName := config.ApplicationConfig.Application.ISPFallbackUpdater.EC2.AutoScalingGroup.Name
+
+	errw := service.cloud.UpdateAutoScalingGroup(ctx, autoScalingGroupName, constants.ZERO)
+	if errw != nil {
+		log.Error(ctx).Msg(fmt.Sprintf("Error on shutting down Auto Scaling Group, retrying on next check: %v", errw.GetMessage()))
+		return
 	}
 
-	distributionConfig := getDistributionConfigOutput.DistributionConfig
-	distributionConfig.DefaultCacheBehavior.TargetOriginId = aws.String(origin)
-
-	input := &cloudfront.UpdateDistributionInput{
-		Id:                 aws.String(distributionId),
-		DistributionConfig: distributionConfig,
-		IfMatch:            getDistributionConfigOutput.ETag,
-	}
-
-	_, err = client.UpdateDistribution(*ctx, input)
-	if err != nil {
-		return &exceptions.WrappedError{
-			Error: err,
-		}
-	}
-
-	return nil
+	service.autoScalingGroupShutdownTime = nil
 }

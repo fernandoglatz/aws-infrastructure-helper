@@ -31,6 +31,7 @@ type ApiError struct {
 	Message      string
 	ResponseBody string
 	Status       int
+	Err          error // underlying transport error, if any
 }
 
 func (apiError ApiError) ToWrappedError(ctx *context.Context) *WrappedError {

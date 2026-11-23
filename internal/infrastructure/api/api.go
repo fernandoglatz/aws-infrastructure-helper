@@ -128,6 +128,7 @@ func executeRequest(ctx *context.Context, method string, requestUrl string, time
 
 		return &exceptions.ApiError{
 			Message: message,
+			Err:     err,
 		}
 	}
 

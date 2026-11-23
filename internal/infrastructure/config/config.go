@@ -37,6 +37,13 @@ type Config struct {
 		ISPFallbackUpdater struct {
 			CheckInterval time.Duration `yaml:"check-interval"`
 
+			// Consecutive failed checks (connection errors) required before enabling the fallback.
+			FailureThreshold int `yaml:"failure-threshold"`
+
+			// Consecutive failed checks of any kind required before enabling the fallback.
+			// Higher than FailureThreshold so short local DNS outages do not trigger a failover.
+			DNSFailureThreshold int `yaml:"dns-failure-threshold"`
+
 			PortFetcher struct {
 				Url     string        `yaml:"url"`
 				Host    string        `yaml:"host"`

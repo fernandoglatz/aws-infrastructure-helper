@@ -53,19 +53,21 @@ Edit `conf/application.yml` to set up your AWS credentials, regions, and other s
 The application runs two background goroutines that periodically perform checks and update AWS resources:
 
 1. **DNS Updater** – Every `DNSUpdater.CheckInterval` it:
-   * Fetches the current public IP from the configured URL.
+   * Fetches the current public IP from the configured URL. If the fetch fails or the response is not a valid IPv4 address, the check is skipped.
    * Resolves the DNS record for the target domain.
-   * If the IP has changed, it updates the Route 53 A record for each hosted zone.
+   * If the IP has changed (or the record cannot be resolved), it updates the Route 53 A record for each hosted zone.
 
 2. **ISP Fallback Updater** – Every `ISPFallbackUpdater.CheckInterval` it:
-   * Calls the port‑fetcher URL to determine if the ISP port is closed.
-   * If the port state changes, it toggles the DNS CNAME record between the normal and fallback values.
+   * Calls the port‑fetcher URL to determine if the ISP port is closed. Any HTTP response counts as open.
+   * The fallback is only enabled after `failure-threshold` consecutive connection failures (default 3), or after `dns-failure-threshold` consecutive failures of any kind (default 30). DNS resolution failures only count toward the second threshold, so a short local DNS outage does not trigger a failover.
+   * If the port state changes, it toggles the DNS CNAME record between the normal and fallback values in every hosted zone.
    * When switching to fallback it also:
      * Sets the CloudFront distribution origin to the fallback origin.
-     * Increases the Auto‑Scaling Group desired capacity to 1.
+     * Increases the Auto‑Scaling Group desired capacity to 1 and cancels any pending shutdown.
    * When switching back to normal it:
      * Schedules the Auto‑Scaling Group to shut down after the configured `ShutdownTime`.
      * Reverts the CloudFront origin to the normal origin.
+   * A failed AWS call is retried on the next check; it never stops the background loop.
 
 All AWS interactions use the AWS SDK v2 and are authenticated with the credentials defined in `conf/application.yml`.
 
